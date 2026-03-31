@@ -31,7 +31,7 @@ class InterviewService {
     }
 
     getAllReportsByUserId = async (userId) => {
-        const reports = await InterviewReport.find({ user: userId }).sort({ createdAt: -1 }).select(-resume - selfDescription - jobDescription - __v - technicalQuestions - behavioralQuestions - skillGaps - preparationPlan);
+        const reports = await InterviewReport.find({ user: userId }).sort({ createdAt: -1 }).select('-resume -selfDescription -jobDescription -__v -technicalQuestions -behavioralQuestions -skillGaps -preparationPlan');
         return reports;
     }
 

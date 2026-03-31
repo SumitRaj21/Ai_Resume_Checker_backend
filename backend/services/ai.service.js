@@ -30,83 +30,195 @@ const interviewReportSchema = z.object({
     title: z.string().describe("The title of the job for which the interview report is generated"),
 })
 
+function normalizeQuestions(arr = []) {
+    return arr.map((item) => {
+        if (typeof item === "string") {
+            return {
+                question: item,
+                intention: "Understand candidate knowledge",
+                answer: "Explain clearly with examples"
+            };
+        }
+        return {
+            question: item?.question || "",
+            intention: item?.intention || "",
+            answer: item?.answer || ""
+        };
+    });
+}
+
+function normalizeSkillGaps(arr = []) {
+    return arr.map((item) => {
+        if (typeof item === "string") {
+            return {
+                skill: item,
+                severity: "medium"
+            };
+        }
+        return {
+            skill: item?.skill || "",
+            severity: item?.severity || "medium"
+        };
+    });
+}
+
+function normalizePlan(arr = []) {
+    return arr.map((item, index) => {
+        if (typeof item === "string") {
+            return {
+                day: index + 1,
+                focus: item,
+                tasks: [item]
+            };
+        }
+        return {
+            day: item?.day || index + 1,
+            focus: item?.focus || "",
+            tasks: item?.tasks || []
+        };
+    });
+}
+async function callAIWithRetry(config, retries = 3) {
+    try {
+        return await googleGenAI.models.generateContent(config);
+    } catch (err) {
+        if (retries === 0) throw err;
+
+        console.log("Retrying AI...");
+        await new Promise(res => setTimeout(res, 2000));
+
+        return callAIWithRetry(config, retries - 1);
+    }
+}
 async function generateInterviewReport({ resume, selfDescription, jobDescription }) {
+    const prompt = `
+Generate a detailed interview report in STRICT JSON format.
 
+RULES:
+- Return ALL fields defined in schema
+- DO NOT skip any field
+- DO NOT return empty arrays
+- Ensure:
+  - technicalQuestions: at least 5 items
+  - behavioralQuestions: at least 5 items
+  - skillGaps: at least 3 items
+  - preparationPlan: at least 5 days
+- Keep answers practical and realistic
 
-    const prompt = `Generate an interview report for a candidate with the following details:
-                        Resume: ${resume}
-                        Self Description: ${selfDescription}
-                        Job Description: ${jobDescription}
-`
-
-    const response = await googleGenAI.models.generateContent({
+Candidate Details:
+Resume: ${resume}
+Self Description: ${selfDescription}
+Job Description: ${jobDescription}
+`;
+    const response = await callAIWithRetry({
         model: "gemini-3-flash-preview",
         contents: prompt,
         config: {
             responseMimeType: "application/json",
             responseSchema: zodToJsonSchema(interviewReportSchema),
         }
-    })
+    });
+    console.log("Raw AI Response:", response.text); // Debug log to see the raw response
+    let parsed;
 
-    return JSON.parse(response.text)
+    try {
+        parsed = JSON.parse(response.text);
+    } catch (err) {
+        throw new Error("Invalid JSON received from AI");
+    }
 
+    return {
+        matchScore: parsed?.matchScore ?? 0,
+        technicalQuestions: normalizeQuestions(parsed?.technicalQuestions),
+        behavioralQuestions: normalizeQuestions(parsed?.behavioralQuestions),
+        skillGaps: normalizeSkillGaps(parsed?.skillGaps),
+        preparationPlan: normalizePlan(parsed?.preparationPlan),
+        title: parsed?.title ?? "Interview Report"
+    };
 
 }
 
 async function generatePdfFromHtml(htmlContent) {
-    const browser = await puppeteer.launch()
-    const page = await browser.newPage();
-    await page.setContent(htmlContent, { waitUntil: "networkidle0" })
+    const browser = await puppeteer.launch({
+        headless: "new",
+        args: ["--no-sandbox", "--disable-setuid-sandbox"]
+    });
 
-    const pdfBuffer = await page.pdf({
-        format: "A4", margin: {
-            top: "20mm",
-            bottom: "20mm",
-            left: "15mm",
-            right: "15mm"
-        }
-    })
+    try {
+        const page = await browser.newPage();
 
-    await browser.close()
+        await page.setContent(htmlContent, {
+            waitUntil: "networkidle0"
+        });
 
-    return pdfBuffer
+        const pdfBuffer = await page.pdf({
+            format: "A4",
+            printBackground: true,
+            margin: {
+                top: "20mm",
+                bottom: "20mm",
+                left: "15mm",
+                right: "15mm"
+            }
+        });
+
+        return pdfBuffer;
+    } finally {
+        await browser.close();
+    }
 }
+
 
 async function generateResumePdf({ resume, selfDescription, jobDescription }) {
 
     const resumePdfSchema = z.object({
-        html: z.string().describe("The HTML content of the resume which can be converted to PDF using any library like puppeteer")
-    })
+        html: z.string()
+    });
 
-    const prompt = `Generate resume for a candidate with the following details:
-                        Resume: ${resume}
-                        Self Description: ${selfDescription}
-                        Job Description: ${jobDescription}
+    const prompt = `
+Generate a professional ATS-friendly resume in STRICT JSON format.
 
-                        the response should be a JSON object with a single field "html" which contains the HTML content of the resume which can be converted to PDF using any library like puppeteer.
-                        The resume should be tailored for the given job description and should highlight the candidate's strengths and relevant experience. The HTML content should be well-formatted and structured, making it easy to read and visually appealing.
-                        The content of resume should be not sound like it's generated by AI and should be as close as possible to a real human-written resume.
-                        you can highlight the content using some colors or different font styles but the overall design should be simple and professional.
-                        The content should be ATS friendly, i.e. it should be easily parsable by ATS systems without losing important information.
-                        The resume should not be so lengthy, it should ideally be 1-2 pages long when converted to PDF. Focus on quality rather than quantity and make sure to include all the relevant information that can increase the candidate's chances of getting an interview call for the given job description.
-                    `
+Return ONLY:
+{ "html": "<valid HTML>" }
 
-    const response = await googleGenAI.models.generateContent({
+Rules:
+- Use proper HTML tags (div, h1, h2, p, ul, li)
+- Keep it clean and professional
+- No scripts or external CSS
+- Highlight relevant skills and experience
+- Keep it 1–2 pages
+- Do NOT return anything except JSON
+
+Candidate Details:
+Resume: ${resume}
+Self Description: ${selfDescription}
+Job Description: ${jobDescription}
+`;
+    const response = await callAIWithRetry({
         model: "gemini-3-flash-preview",
         contents: prompt,
         config: {
             responseMimeType: "application/json",
             responseSchema: zodToJsonSchema(resumePdfSchema),
         }
-    })
+    });
 
+    let jsonContent;
 
-    const jsonContent = JSON.parse(response.text)
+    try {
+        jsonContent = JSON.parse(response.text);
+    } catch (err) {
+        console.error("AI Raw Response:", response.text);
+        throw new Error("Invalid JSON received for resume");
+    }
 
-    const pdfBuffer = await generatePdfFromHtml(jsonContent.html)
+    if (!jsonContent?.html || typeof jsonContent.html !== "string") {
+        throw new Error("AI did not return valid HTML");
+    }
 
-    return pdfBuffer
+    const pdfBuffer = await generatePdfFromHtml(jsonContent.html);
 
+    return pdfBuffer;
 }
 
 module.exports = {
